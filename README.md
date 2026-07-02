@@ -1,4 +1,4 @@
-# Kinemomics-chicken-heart
+# Kinemomics
 
 **Contents:** This repository contains sample data and scripts required to analyse spatiotemporally resolved live cell migratory kinematic data, coupled with endpoint immunofluorescence imaging data, to identify myocardial subpopulations, delineate tissue-domain boundaries, and map spatiotemporal evolution during embryonic development of the chicken heart compact-trabeculae myocardium. 
 
