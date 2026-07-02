@@ -10,7 +10,7 @@
 
 **Cite:** bioRxiv 2026.05.19.726402; doi: https://doi.org/10.64898/2026.05.19.726402
 
-**Zenodo:** gd375-GD. (2026). gd375-GD/Kinemomics-chicken-heart: Kinemomics v1.0.0 (Kinemomics_v1.0.0_alpha). Zenodo. https://doi.org/10.5281/zenodo.21142503
+**Zenodo:** Dong, G. (2026). Kinemomics maps spatiotemporal morphodynamics in live beating fetal heart slices (Kinemomics_v1.0.0_alpha). Zenodo. https://doi.org/10.5281/zenodo.21142503
 
 *Corresponding Author
 
