@@ -1,0 +1,233 @@
+
+
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(uwot)
+library(mclust)
+library(scales)
+library(cluster)
+library(RColorBrewer)
+library(igraph)
+library(FNN)
+library(SingleCellExperiment)
+library(slingshot)
+library(grid)
+library(ggforce)  
+library(dplyr)
+
+
+data_umap_region_clustered <- read.csv("UMAP_GMM_Region_Clusters_SHAM_S1_HR.csv")
+
+# Compute cluster centroid
+centroids <- data_umap_region_clustered %>%
+  group_by(cluster_gmm_region) %>%
+  summarise(
+    UMAP1 = mean(UMAP1),
+    UMAP2 = mean(UMAP2),
+    mean_HR = mean(HR, na.rm = TRUE), # mean tracking duration
+    mean_mag = mean(mag, na.rm = TRUE),
+    mean_xy = mean(x+y, na.rm = TRUE),
+    region = dplyr::first(region),
+    .groups = "drop"
+  )
+
+
+
+# Build inter-cluster trajectory graph (kNN edges)
+
+coords <- as.matrix(centroids[, c("UMAP1", "UMAP2")])
+k <- 3  # number of neighbors
+knn_res <- get.knn(coords, k = k)
+
+edges <- do.call(rbind, lapply(1:nrow(knn_res$nn.index), function(i) {
+  data.frame(
+    from = centroids$cluster_gmm_region[i],
+    to   = centroids$cluster_gmm_region[knn_res$nn.index[i, ]]
+  )
+}))
+edges <- unique(edges)  # remove duplicates
+
+# Add coordinates for plotting
+edge_coords <- edges %>%
+  left_join(centroids, by = c("from" = "cluster_gmm_region")) %>%
+  left_join(centroids, by = c("to" = "cluster_gmm_region"), suffix = c(".from", ".to"))
+
+
+# sanity check
+ggplot(data_umap_region_clustered, aes(UMAP1, UMAP2, color = cluster_gmm_region)) +
+  geom_point(size = 1.8, alpha = 0.7) +
+  geom_segment(
+    data = edge_coords,
+    aes(x = UMAP1.from, y = UMAP2.from, xend = UMAP1.to, yend = UMAP2.to),
+    color = "black", size = 1, alpha = 0.6
+  ) +
+  geom_point(data = centroids, aes(UMAP1, UMAP2), color = "black", size = 4, shape = 21, fill = "white") +
+  scale_color_manual(values = cluster_colors) +
+  labs(color=NULL) +
+  theme_minimal(base_size=25) +
+  theme(panel.border=element_blank(),
+        panel.grid=element_blank(),
+        axis.title=element_blank(),
+        axis.text=element_blank(),
+        legend.title=element_text(size=20),
+        legend.text=element_text(size=20))
+
+
+
+# Prepare Slingshot pseudotime analysis
+
+umap_mat <- as.matrix(data_umap_region_clustered[, c("UMAP1", "UMAP2")])
+clusters <- factor(data_umap_region_clustered$cluster_gmm_region)
+
+sce <- SingleCellExperiment(
+  assays = list(counts = matrix(0, nrow = 2, ncol = nrow(umap_mat)))  # dummy counts
+)
+reducedDims(sce)$UMAP <- umap_mat
+
+# Set starting cluster as the one with minimum mean(HR) == mean tracking duration
+start_cluster <- centroids %>%
+  slice_min(mean_HR, n = 1, with_ties = FALSE) %>%
+  pull(cluster_gmm_region)
+
+cat("Starting cluster for trajectory:", start_cluster, "\n")
+
+sce <- slingshot(
+  sce,
+  clusterLabels = clusters,
+  reducedDim = "UMAP",
+  start.clus = start_cluster
+)
+
+
+pseudotime <- slingPseudotime(sce)
+# For each cell, pick the first non-NA pseudotime from any lineage
+data_umap_region_clustered$pseudotime <- apply(pseudotime, 1, function(x) {
+  if(all(is.na(x))) {
+    NA
+  } else {
+    x[which(!is.na(x))[1]]  # take the first non-NA pseudotime
+  }
+})
+
+# SAVE RESULTS
+write.csv(data_umap_region_clustered, "UMAP_Trajectory_Pseudotime_SHAM_S1_HR.csv", row.names = FALSE)
+
+
+# Plot pseudotime with Slingshot curves and arrows
+
+# Base pseudotime scatter
+p.pseudo.arrow <- ggplot(data_umap_region_clustered, aes(UMAP1, UMAP2, color = pseudotime)) +
+  geom_point(size = 2, alpha = 0.8) +
+  scale_color_gradientn(colors = c("navy", "blue", "cyan", "yellow", "red"),
+                        oob = scales::squish) +
+  theme_minimal(base_size = 25) +
+  theme(panel.border=element_blank(),
+        panel.grid=element_blank(),
+        axis.title=element_blank(),
+        axis.text=element_blank(),
+        legend.title = element_text(size = 20),
+        legend.text = element_text(size = 20)) +
+  labs(color = "Pseudotime")
+
+# Extract Slingshot curves
+lineage_curves <- slingCurves(sce)
+
+# Loop through curves and add them with arrows
+for(i in seq_along(lineage_curves)) {
+  curve_df <- as.data.frame(lineage_curves[[i]]$s)
+  colnames(curve_df) <- c("UMAP1","UMAP2")
+  
+  # Trim curve to 10???90%
+  curve_len <- nrow(curve_df)
+  keep_idx <- seq(floor(0.1 * curve_len), ceiling(0.9 * curve_len))
+  curve_df <- curve_df[keep_idx, ]
+  
+  # Add curve line
+  p.pseudo.arrow <- p.pseudo.arrow +
+    geom_path(data = curve_df, aes(x = UMAP1, y = UMAP2), color = "black", size = 1)
+  
+  # Prepare arrow data.frame (avoid looping back)
+  arrow_idx <- seq(1, nrow(curve_df)-1, by = 20)
+  arrow_df <- data.frame(
+    x = curve_df$UMAP1[arrow_idx],
+    y = curve_df$UMAP2[arrow_idx],
+    xend = curve_df$UMAP1[arrow_idx + 1],
+    yend = curve_df$UMAP2[arrow_idx + 1]
+  )
+  
+  # Add arrows
+  p.pseudo.arrow <- p.pseudo.arrow +
+    geom_segment(
+      data = arrow_df,
+      aes(x = x, y = y, xend = xend, yend = yend),
+      arrow = arrow(length = unit(0.4, "cm")),
+      color = "black",
+      size = 1
+    )
+}
+
+# Save
+ggsave("Pseudotime_UMAP_SHAM_S1_Arrows.png", plot = p.pseudo.arrow, width = 8, height = 5, dpi = 500)
+
+
+
+# Base GMM cluster scatter
+p.gmm.arrow <- ggplot(data_umap_region_clustered, aes(UMAP1, UMAP2, color = cluster_gmm_region)) +
+  geom_point(size = 2, alpha = 0.8) +
+  scale_color_manual(values = cluster_colors) +
+  theme_minimal(base_size = 25) +
+  theme(panel.border=element_blank(),
+        panel.grid=element_blank(),
+        axis.title=element_blank(),
+        axis.text=element_blank(),
+        legend.title = element_text(size = 20),
+        legend.text = element_text(size = 20)) +
+  labs(color = NULL)
+
+# Extract Slingshot curves
+lineage_curves <- slingCurves(sce)
+
+# Add curves and arrows for each lineage
+for(i in seq_along(lineage_curves)) {
+  curve_df <- as.data.frame(lineage_curves[[i]]$s)
+  colnames(curve_df) <- c("UMAP1","UMAP2")
+  
+  # Trim curve to 15???95%
+  curve_len <- nrow(curve_df)
+  keep_idx <- seq(floor(0.15 * curve_len), ceiling(0.95 * curve_len))
+  curve_df <- curve_df[keep_idx, ]
+  
+  # Add curve line
+  p.gmm.arrow <- p.gmm.arrow +
+    geom_path(data = curve_df, aes(x = UMAP1, y = UMAP2), color = "black", size = 1)
+  
+  # Prepare arrows
+  arrow_idx <- seq(1, nrow(curve_df) - 1, by = 20)
+  arrow_idx <- arrow_idx[arrow_idx < nrow(curve_df)]
+  
+  arrow_df <- data.frame(
+    x = curve_df$UMAP1[arrow_idx],
+    y = curve_df$UMAP2[arrow_idx],
+    xend = curve_df$UMAP1[arrow_idx] +
+      0.5 * (curve_df$UMAP1[arrow_idx + 1] - curve_df$UMAP1[arrow_idx]),
+    yend = curve_df$UMAP2[arrow_idx] +
+      0.5 * (curve_df$UMAP2[arrow_idx + 1] - curve_df$UMAP2[arrow_idx])
+  )
+  
+  # Add arrows
+  p.gmm.arrow <- p.gmm.arrow +
+    geom_segment(
+      data = arrow_df,
+      aes(x = x, y = y, xend = xend, yend = yend),
+      arrow = arrow(length = unit(0.4, "cm")),
+      color = "black",
+      size = 1
+    )
+}
+
+# Save
+ggsave("UMAP_Slingshot_SHAM_S1_Arrows.png", plot = p.gmm.arrow, width = 8, height = 5, dpi = 500)
+
+
+
